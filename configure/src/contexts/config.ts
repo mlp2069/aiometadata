@@ -1,4 +1,5 @@
 import type { BuilderEntry } from '@shared/types';
+import type { ParentConfigLink } from '../../../addon/lib/parentConfig';
 
 export type TagColorKey =
   | 'blue' | 'green' | 'red' | 'violet' | 'amber' | 'cyan'
@@ -476,4 +477,6 @@ export interface AppConfig {
   customLandscapeUrlPattern?: string;
   customLogoUrlPattern?: string;
   customThumbnailUrlPattern?: string;
+  /** Another configuration whose settings this one takes, section by section. */
+  parentConfig?: ParentConfigLink;
 }
