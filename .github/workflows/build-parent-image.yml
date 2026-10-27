@@ -1,0 +1,115 @@
+name: Build AIOMetadata with Parent Config
+
+# Newest cedya77/aiometadata release + the commits on feat/parent-config,
+# published as ghcr.io/<owner>/aiometadata:latest for the self-hosted instance.
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if this release and patch were already built
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency: build-parent-image
+
+env:
+  UPSTREAM: cedya77/aiometadata
+  PATCH_BRANCH: feat/parent-config
+
+jobs:
+  build:
+    # Native ARM: the server is an Oracle Ampere box.
+    # shortcut: arm64 only, add linux/amd64 (and QEMU) if the server ever moves to x86.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out what to build
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          TAG="$(gh release view --repo "$UPSTREAM" --json tagName --jq .tagName)"
+          PATCH="$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" "refs/heads/$PATCH_BRANCH" | cut -c1-8)"
+          [ -n "$PATCH" ] || { echo "::error::$PATCH_BRANCH not found"; exit 1; }
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/aiometadata"
+          VERSION="${TAG#v}"
+          SKIP=false
+          if [ "$FORCE" != true ] && docker manifest inspect "$IMAGE:$VERSION-parent-$PATCH" >/dev/null 2>&1; then
+            SKIP=true
+            echo "Already built $VERSION with patch $PATCH"
+          fi
+          {
+            echo "tag=$TAG"; echo "version=$VERSION"; echo "patch=$PATCH"
+            echo "image=$IMAGE"; echo "skip=$SKIP"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out the upstream release
+        if: steps.plan.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ steps.plan.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Apply the Parent Config commits
+        if: steps.plan.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin dev
+          git fetch --quiet "https://github.com/$GITHUB_REPOSITORY" "$PATCH_BRANCH"
+          COMMITS="$(git rev-list --reverse "$(git merge-base FETCH_HEAD origin/dev)..FETCH_HEAD")"
+          echo "Applying onto ${{ steps.plan.outputs.tag }}:"; git log --oneline --no-walk $COMMITS
+          if ! git -c user.name=build -c user.email=build@localhost cherry-pick $COMMITS; then
+            git status --short
+            echo "::error::Parent Config no longer applies cleanly to ${{ steps.plan.outputs.tag }}. The running image is unchanged; the patch needs updating."
+            exit 1
+          fi
+
+      - name: Check the merge
+        if: steps.plan.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - if: steps.plan.outputs.skip != 'true'
+        run: |
+          npm ci --no-audit --no-fund
+          npm run check:parent-config
+          npm run generate:build-info
+          npx tsc -p tsconfig.backend.json --noEmit
+          npx tsc -p tsconfig.app.json --noEmit
+
+      - name: Set up Docker Buildx
+        if: steps.plan.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        if: steps.plan.outputs.skip != 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ steps.plan.outputs.image }}:latest
+            ${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.version }}-parent
+            ${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.version }}-parent-${{ steps.plan.outputs.patch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=AIOMetadata ${{ steps.plan.outputs.version }} with Parent Config
+            org.opencontainers.image.version=${{ steps.plan.outputs.version }}-parent
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
