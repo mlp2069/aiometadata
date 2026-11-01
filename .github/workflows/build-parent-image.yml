@@ -1,6 +1,6 @@
 name: Build AIOMetadata with Parent Config
 
-# Newest cedya77/aiometadata release + the commits on feat/parent-config,
+# Newest cedya77/aiometadata release + the commits on parent-config,
 # published as ghcr.io/<owner>/aiometadata:latest for the self-hosted instance.
 on:
   schedule:
@@ -20,7 +20,7 @@ concurrency: build-parent-image
 
 env:
   UPSTREAM: cedya77/aiometadata
-  PATCH_BRANCH: feat/parent-config
+  PATCH_BRANCH: parent-config
 
 jobs:
   build:
@@ -69,9 +69,10 @@ jobs:
         if: steps.plan.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          git fetch --quiet origin dev
           git fetch --quiet "https://github.com/$GITHUB_REPOSITORY" "$PATCH_BRANCH"
-          COMMITS="$(git rev-list --reverse "$(git merge-base FETCH_HEAD origin/dev)..FETCH_HEAD")"
+          # The patch branch sits on a release tag; upstream rewrites dev history, never its release tags.
+          BASE="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' FETCH_HEAD)"
+          COMMITS="$(git rev-list --reverse "$BASE..FETCH_HEAD")"
           echo "Applying onto ${{ steps.plan.outputs.tag }}:"; git log --oneline --no-walk $COMMITS
           if ! git -c user.name=build -c user.email=build@localhost cherry-pick $COMMITS; then
             git status --short
